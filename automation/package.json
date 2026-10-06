@@ -15,7 +15,7 @@
     "triage:file": "tsx tools/flake-triage.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.20.5",
+    "@types/node": "^26.6.4",
     "cross-env": "^7.0.3",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
