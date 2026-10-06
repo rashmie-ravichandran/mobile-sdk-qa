@@ -1,0 +1,81 @@
+# What runs on every pull request in this repo: the contract example only
+# (typecheck, tests, parity from files, mutation check). The static checks, the
+# per-module tests and the mobile build and device stages of a real pipeline are
+# not here because this repo has no mobile code. See ci/release-validation.yml.
+name: pr-checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 4 * * *' # nightly, so a dependency update that breaks us shows up by itself
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }} # never cancel a run on main or the nightly one
+
+defaults:
+  run:
+    # Naming the shell explicitly turns on pipefail. Without it, a failing
+    # command piped into tee (the mutation step below) would still pass.
+    shell: bash
+    working-directory: automation
+
+jobs:
+  contract-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: automation/package-lock.json
+      - run: npm ci
+      - run: mkdir -p reports
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Contract, parity, interaction and triage tests
+        run: npm test
+        env:
+          CI: 'true' # makes vitest also write reports/junit.xml
+
+      # Platform jobs hand over plain files and a separate step compares them.
+      # This is the same hand-over the release pipeline uses (ci/release-validation.yml).
+      - name: Parity from files
+        run: |
+          npm run --silent native:emit -- android out/android.json
+          npm run --silent native:emit -- ios out/ios.json
+          npm run --silent native:compare -- out/android.json out/ios.json
+
+      # Do the tests notice when the code is wrong? Each planted mistake in
+      # src/sdk/faults.ts is switched on in turn and the suite must go red.
+      # A mistake that gets through means a behaviour nobody is checking.
+      - name: Mutation check (every planted fault must be caught)
+        run: npm run --silent mutation | tee reports/mutation.txt
+
+      - name: Publish the mutation result in the job summary
+        run: |
+          {
+            echo '### Mutation check'
+            echo '```'
+            cat reports/mutation.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports
+          path: |
+            automation/reports/
+            automation/out/
+          if-no-files-found: ignore

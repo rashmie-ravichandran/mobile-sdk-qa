@@ -1,0 +1,4 @@
+node_modules/
+automation/reports/
+automation/ios35.log
+.DS_Store

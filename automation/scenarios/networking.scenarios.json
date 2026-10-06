@@ -1,0 +1,800 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "id": "get-200",
+      "title": "GET succeeds on the first try",
+      "why": "baseline: one attempt, no waiting, body passed through untouched",
+      "request": {
+        "method": "GET",
+        "path": "/orders",
+        "headers": {
+          "authorization": "Bearer test-token"
+        }
+      },
+      "server": [
+        {
+          "status": 200,
+          "json": {
+            "orders": []
+          }
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 1,
+        "body": {
+          "orders": []
+        }
+      }
+    },
+    {
+      "id": "delete-204",
+      "title": "204 with no body is a success with an empty body",
+      "why": "an empty body must not be reported as a decode error",
+      "request": {
+        "method": "DELETE",
+        "path": "/orders/17"
+      },
+      "server": [
+        {
+          "status": 204
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 204,
+        "attempts": 1,
+        "body": null
+      }
+    },
+    {
+      "id": "get-503-then-200",
+      "title": "GET recovers after one 503",
+      "why": "a short outage on the backend should not reach the user",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 503
+        },
+        {
+          "status": 200,
+          "json": {
+            "orders": [
+              1
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2
+      }
+    },
+    {
+      "id": "get-500-persistent",
+      "title": "GET gives up after 3 attempts on a persistent 500",
+      "why": "retries must be bounded, and the final error must carry the status",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 500
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "SERVER_ERROR",
+        "status": 500,
+        "attempts": 3,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "get-404",
+      "title": "404 is the caller's problem and is not retried",
+      "why": "retrying a 4xx only repeats the same answer and hammers the backend",
+      "request": {
+        "method": "GET",
+        "path": "/orders/does-not-exist"
+      },
+      "server": [
+        {
+          "status": 404,
+          "json": {
+            "error": "not found"
+          }
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "CLIENT_ERROR",
+        "status": 404,
+        "attempts": 1,
+        "outcomeUnknown": false
+      }
+    },
+    {
+      "id": "get-401",
+      "title": "401 is surfaced as UNAUTHENTICATED and not retried",
+      "why": "token refresh belongs to the auth module; the network layer must not loop on a dead token",
+      "request": {
+        "method": "GET",
+        "path": "/orders",
+        "headers": {
+          "authorization": "Bearer expired"
+        }
+      },
+      "server": [
+        {
+          "status": 401
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "UNAUTHENTICATED",
+        "status": 401,
+        "attempts": 1,
+        "outcomeUnknown": false
+      }
+    },
+    {
+      "id": "get-429-retry-after",
+      "title": "429 with Retry-After waits at least as long as asked",
+      "why": "ignoring Retry-After makes a rate limit worse",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 429,
+          "headers": {
+            "retry-after": "2"
+          }
+        },
+        {
+          "status": 200,
+          "json": {}
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2,
+        "waitAtLeastMs": 2000
+      }
+    },
+    {
+      "id": "get-429-retry-after-too-long",
+      "title": "429 with a very long Retry-After is handed back, not waited out",
+      "why": "an app must not freeze for an hour because a header said so",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 429,
+          "headers": {
+            "retry-after": "3600"
+          }
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "RATE_LIMITED",
+        "status": 429,
+        "attempts": 1,
+        "retryAfterMs": 3600000,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "get-200-not-json",
+      "title": "a 200 with an HTML error page is a decode error",
+      "why": "captive portals and proxies return 200 with the wrong body; this must not crash the caller or be retried",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 200,
+          "raw": "<html>please log in to the wifi</html>"
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "DECODE_ERROR",
+        "status": 200,
+        "attempts": 1,
+        "outcomeUnknown": false
+      }
+    },
+    {
+      "id": "get-timeout-then-200",
+      "title": "GET that times out once is retried",
+      "why": "GET is safe to repeat, so a slow first answer should not be a user-visible failure",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 200,
+          "json": {},
+          "delayMs": 2500
+        },
+        {
+          "status": 200,
+          "json": {
+            "orders": []
+          }
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2
+      },
+      "config": {
+        "requestTimeoutMs": 150
+      }
+    },
+    {
+      "id": "get-timeout-persistent",
+      "title": "GET that always times out ends as TIMEOUT after 3 attempts",
+      "why": "the caller needs a typed error and to know no answer was ever seen",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 200,
+          "json": {},
+          "delayMs": 2500
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "TIMEOUT",
+        "attempts": 3,
+        "outcomeUnknown": true
+      },
+      "config": {
+        "requestTimeoutMs": 150
+      }
+    },
+    {
+      "id": "get-dropped-then-200",
+      "title": "GET survives a dropped connection",
+      "why": "mobile networks drop connections mid-request all the time",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "drop": true
+        },
+        {
+          "status": 200,
+          "json": {}
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2
+      }
+    },
+    {
+      "id": "post-503-no-key",
+      "title": "POST without an idempotency key is not retried after a 503",
+      "why": "a 503 can come from a gateway after the backend already did the work, so without a key a retry could create a duplicate payment, and the caller has to be told the outcome is unknown",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        }
+      },
+      "server": [
+        {
+          "status": 503
+        },
+        {
+          "status": 201,
+          "json": {
+            "id": "p1"
+          }
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "SERVER_ERROR",
+        "status": 503,
+        "attempts": 1,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "post-500-no-key",
+      "title": "POST without an idempotency key is not retried after a 500",
+      "why": "a 500 can arrive after part of the work was done; repeating can double-charge",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        }
+      },
+      "server": [
+        {
+          "status": 500
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "SERVER_ERROR",
+        "status": 500,
+        "attempts": 1,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "post-timeout-no-key",
+      "title": "POST without an idempotency key is NOT retried after a timeout",
+      "why": "the server may have processed the first request; a retry could create a duplicate payment",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        }
+      },
+      "server": [
+        {
+          "status": 201,
+          "json": {
+            "id": "p1"
+          },
+          "delayMs": 2500
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "TIMEOUT",
+        "attempts": 1,
+        "outcomeUnknown": true
+      },
+      "config": {
+        "requestTimeoutMs": 150
+      }
+    },
+    {
+      "id": "post-dropped-no-key",
+      "title": "POST without an idempotency key is NOT retried after a dropped connection",
+      "why": "same risk as the timeout case, a different way to lose the answer",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        }
+      },
+      "server": [
+        {
+          "drop": true
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "NETWORK",
+        "attempts": 1,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "post-timeout-with-key",
+      "title": "POST with an idempotency key IS retried after a timeout, with the same key",
+      "why": "the key is what makes repeating safe, so it has to be identical on every attempt",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        },
+        "idempotencyKey": "key-123"
+      },
+      "server": [
+        {
+          "status": 201,
+          "json": {
+            "id": "p1"
+          },
+          "delayMs": 2500
+        },
+        {
+          "status": 201,
+          "json": {
+            "id": "p1"
+          }
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 201,
+        "attempts": 2
+      },
+      "config": {
+        "requestTimeoutMs": 150
+      }
+    },
+    {
+      "id": "get-500-secret-in-url",
+      "title": "errors never contain query strings or auth tokens",
+      "why": "error messages end up in logs and crash reports",
+      "request": {
+        "method": "GET",
+        "path": "/orders?access_token=s3cr3t-query",
+        "headers": {
+          "authorization": "Bearer s3cr3t-header"
+        }
+      },
+      "server": [
+        {
+          "status": 500
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "SERVER_ERROR",
+        "status": 500,
+        "attempts": 3,
+        "mustNotLeak": [
+          "s3cr3t-query",
+          "s3cr3t-header"
+        ],
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "get-503-retry-after",
+      "title": "503 with Retry-After waits at least as long as asked",
+      "why": "a backend that is shedding load tells us when to come back; ignoring it adds to the pile",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 503,
+          "headers": {
+            "retry-after": "1"
+          }
+        },
+        {
+          "status": 200,
+          "json": {}
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2,
+        "waitAtLeastMs": 1000
+      }
+    },
+    {
+      "id": "get-503-retry-after-too-long",
+      "title": "503 with a very long Retry-After is handed back, not waited out",
+      "why": "same protection as for 429: the app decides, the SDK never blocks for minutes",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 503,
+          "headers": {
+            "retry-after": "3600"
+          }
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "SERVER_ERROR",
+        "status": 503,
+        "attempts": 1,
+        "retryAfterMs": 3600000,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "get-429-retry-after-at-limit",
+      "title": "a Retry-After of exactly 10 seconds is still waited out",
+      "why": "the boundary of the \"too long\" rule; off-by-one here changes behaviour for every rate-limited call",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 429,
+          "headers": {
+            "retry-after": "10"
+          }
+        },
+        {
+          "status": 200,
+          "json": {}
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2,
+        "waitAtLeastMs": 10000
+      }
+    },
+    {
+      "id": "get-429-persistent",
+      "title": "a 429 that never clears ends as RATE_LIMITED after 3 attempts",
+      "why": "the last-attempt branch is separate code from the first-attempt one and needs its own check",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 429
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "RATE_LIMITED",
+        "status": 429,
+        "attempts": 3,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "put-500-then-200",
+      "title": "PUT is retried after a 500",
+      "why": "PUT is idempotent by definition, so repeating it is safe; this is the case that distinguishes it from POST",
+      "request": {
+        "method": "PUT",
+        "path": "/profile",
+        "body": {
+          "name": "A"
+        }
+      },
+      "server": [
+        {
+          "status": 500
+        },
+        {
+          "status": 200,
+          "json": {
+            "name": "A"
+          }
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2
+      }
+    },
+    {
+      "id": "post-502-no-key",
+      "title": "POST without an idempotency key is not retried after a 502",
+      "why": "a gateway error does not tell us whether the upstream acted on the request",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        }
+      },
+      "server": [
+        {
+          "status": 502
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "SERVER_ERROR",
+        "status": 502,
+        "attempts": 1,
+        "outcomeUnknown": true
+      }
+    },
+    {
+      "id": "post-key-500-then-201",
+      "title": "POST with an idempotency key is retried after a 500",
+      "why": "checks that the key really is what makes a retried POST safe",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        },
+        "idempotencyKey": "key-456"
+      },
+      "server": [
+        {
+          "status": 500
+        },
+        {
+          "status": 201,
+          "json": {
+            "id": "p2"
+          }
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 201,
+        "attempts": 2
+      }
+    },
+    {
+      "id": "get-408-not-retried",
+      "title": "408 is treated like any other 4xx and is not retried",
+      "why": "a simplification the spec makes on purpose (see the questions list); the scenario pins it so a change is a decision, not an accident",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 408
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "CLIENT_ERROR",
+        "status": 408,
+        "attempts": 1,
+        "outcomeUnknown": false
+      }
+    },
+    {
+      "id": "get-429-retry-after-garbage",
+      "title": "a Retry-After that is not plain seconds is ignored, not guessed at",
+      "why": "a parser that accepts \"1e3\" reads it as 1000 seconds and gives up instead of retrying; a malformed header should be ignored",
+      "request": {
+        "method": "GET",
+        "path": "/orders"
+      },
+      "server": [
+        {
+          "status": 429,
+          "headers": {
+            "retry-after": "1e3"
+          }
+        },
+        {
+          "status": 200,
+          "json": {}
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 200,
+        "attempts": 2
+      }
+    },
+    {
+      "id": "post-429-no-key",
+      "title": "POST without an idempotency key is not retried after a 429",
+      "why": "most rate limiters reject before doing any work, but that is for the backend to promise (see the questions list), so the default is not to repeat and to report the outcome as unknown",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        }
+      },
+      "server": [
+        {
+          "status": 429,
+          "headers": {
+            "retry-after": "1"
+          }
+        },
+        {
+          "status": 201,
+          "json": {
+            "id": "p3"
+          }
+        }
+      ],
+      "expect": {
+        "ok": false,
+        "code": "RATE_LIMITED",
+        "status": 429,
+        "attempts": 1,
+        "outcomeUnknown": true,
+        "retryAfterMs": 1000
+      }
+    },
+    {
+      "id": "post-key-429-then-201",
+      "title": "POST with an idempotency key is retried after a 429",
+      "why": "with a key, a rate-limited POST can wait and try again like any other request",
+      "request": {
+        "method": "POST",
+        "path": "/payments",
+        "body": {
+          "amount": 10
+        },
+        "idempotencyKey": "key-429-1"
+      },
+      "server": [
+        {
+          "status": 429,
+          "headers": {
+            "retry-after": "1"
+          }
+        },
+        {
+          "status": 201,
+          "json": {
+            "id": "p3"
+          }
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 201,
+        "attempts": 2,
+        "waitAtLeastMs": 1000
+      }
+    },
+    {
+      "id": "delete-timeout-then-204",
+      "title": "DELETE is retried after a timeout",
+      "why": "DELETE is idempotent, like PUT; this keeps the \"safe to repeat\" rule from being a GET-only rule",
+      "request": {
+        "method": "DELETE",
+        "path": "/orders/17"
+      },
+      "server": [
+        {
+          "status": 204,
+          "delayMs": 2500
+        },
+        {
+          "status": 204
+        }
+      ],
+      "expect": {
+        "ok": true,
+        "status": 204,
+        "attempts": 2
+      },
+      "config": {
+        "requestTimeoutMs": 150
+      }
+    }
+  ],
+  "policy": {
+    "maxAttempts": 3,
+    "baseDelayMs": 200,
+    "maxDelayMs": 300,
+    "jitterFloor": 0.5,
+    "maxRetryAfterMs": 10000
+  }
+}

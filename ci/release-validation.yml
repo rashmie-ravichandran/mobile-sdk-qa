@@ -1,0 +1,173 @@
+# ILLUSTRATIVE. Not wired to anything; it lives in ci/, not .github/workflows/,
+# on purpose. The mobile build and device steps are stubs (they echo what they
+# would do) because this repo has no mobile code, an internal registry or
+# device capacity. What is real: the shape, the dependencies between stages,
+# the parity step (it runs the compare tool from this repo) and the aggregation
+# in the quality gate, which fails when any stage failed or was skipped. The
+# individual checks listed inside the gate are stubs.
+#
+# Written as GitHub Actions because most people can read it. The same shape
+# maps onto Azure DevOps, GitLab or Jenkins stages.
+name: sdk-release-validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Release candidate version, for example 3.5.0-rc.2
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash # explicit, so pipefail is on
+
+env:
+  CANDIDATE: ${{ inputs.candidate }}
+
+jobs:
+  build-candidate:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "build XCFrameworks and AARs for $CANDIDATE, publish to the internal registry as a pre-release (stub)"
+      - run: echo "generate module manifests and the resolved dependency lock for $CANDIDATE (stub)"
+
+  static-gates:
+    needs: build-candidate
+    runs-on: macos-latest # the iOS API diff needs Xcode tooling
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Android - public API check vs the last release; fail on a breaking change without a major bump (stub)"
+      - run: echo "iOS - swift-api-digester on the .swiftinterface files vs the last release (stub)"
+      - run: echo "check resolved versions against the manifests; fail on conflicting transitive versions - Gradle failOnVersionConflict, Package.resolved diff (stub)"
+      - run: echo "dependency vulnerability scan and secret scan (stub)"
+
+  contract-android:
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Run the shared scenarios with the native Android runner
+        working-directory: automation
+        run: |
+          echo "start the mock server, run the instrumented test per scenario against $CANDIDATE (stub)"
+          echo "stand-in for the real runner, so the stage produces a file:"
+          npm ci
+          npm run native:emit -- android out/android.json
+      - uses: actions/upload-artifact@v4
+        with: { name: contract-android, path: automation/out/android.json }
+
+  contract-ios:
+    needs: build-candidate
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Run the shared scenarios with the native iOS runner
+        working-directory: automation
+        run: |
+          echo "start the mock server, run the XCTest per scenario against $CANDIDATE (stub)"
+          echo "stand-in for the real runner, so the stage produces a file:"
+          npm ci
+          npm run native:emit -- ios out/ios.json
+      - uses: actions/upload-artifact@v4
+        with: { name: contract-ios, path: automation/out/ios.json }
+
+  parity:
+    needs: [contract-android, contract-ios]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { path: automation/out, merge-multiple: true }
+      - name: Each platform against the spec, and against each other
+        working-directory: automation
+        run: |
+          npm ci
+          npm run native:compare -- out/android.json out/ios.json
+
+  compatibility-matrix:
+    needs: [static-gates, parity]
+    strategy:
+      fail-fast: false # we want the whole matrix result, not only the first failure
+      matrix:
+        include:
+          # Generated from the manifests in reality: the production set, the
+          # latest set, and a pairwise selection. Typed by hand here.
+          - { platform: ios, runner: macos-latest, os: min-supported, modules: production-set }
+          - { platform: ios, runner: macos-latest, os: latest, modules: latest-set }
+          - { platform: ios, runner: macos-latest, os: latest, modules: pairwise-1 }
+          - { platform: android, runner: ubuntu-latest, os: min-supported, modules: production-set }
+          - { platform: android, runner: ubuntu-latest, os: latest, modules: latest-set }
+          - { platform: android, runner: ubuntu-latest, os: latest, modules: pairwise-1 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - run: echo "integration host on ${{ matrix.platform }} / OS ${{ matrix.os }} / ${{ matrix.modules }}, with run metadata (versions, OS, runner, seed, order) written out (stub)"
+
+  security-and-accessibility:
+    needs: build-candidate
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - run: echo "automated security checks on the integration host - pinning rejects a bad certificate, no tokens in logs, secure storage behaviour (stub)"
+      - run: echo "accessibility checks for SDK UI components - Espresso AccessibilityChecks and XCUITest performAccessibilityAudit (stub)"
+
+  consumer-verification:
+    needs: build-candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [new-app, consuming-app-a, consuming-app-b]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - run: echo "build ${{ matrix.app }} (iOS and Android) against $CANDIDATE and run its smoke tests (stub)"
+
+  quality-gate:
+    # Every job is listed, so the gate doesn't depend on 'skipped' propagating
+    # through other jobs.
+    needs: [build-candidate, static-gates, contract-android, contract-ios, parity, compatibility-matrix, security-and-accessibility, consumer-verification]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # 'always()' is there so the gate reports even when a stage failed. The
+      # first step is what makes it actually fail in that case, which stops the
+      # adoption stage below. A skipped stage counts as a failure too, so a stage that is
+      # meant to be optional must not be listed in 'needs'.
+      - name: Fail unless every stage succeeded
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: |
+          echo "::error::quality gate failed: ${{ join(needs.*.result, ', ') }}"
+          exit 1
+      - name: Remaining checks (stubs)
+        run: |
+          echo "no new quarantined tests, none past their expiry (stub)"
+          echo "binary size / cold start / memory within budget (stub)"
+          echo "changelog and migration notes present (stub)"
+          echo "publish one summary: failing layer, owning module, first failing assertion, artifact links (stub)"
+
+  staged-adoption:
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: sdk-release # manual approval point
+    steps:
+      # The SDK team doesn't ship to users; consuming apps adopt the version and
+      # run their own phased store releases. This stage only marks who may adopt it.
+      - run: echo "mark $CANDIDATE as available to the new app and the canary consuming apps (stub)"
+      - run: echo "after the agreed period, compare crash-free and SDK error rates with the previous version; open it to all apps or switch the feature off remotely (stub)"
